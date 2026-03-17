@@ -1,0 +1,3 @@
+# Prevent Git from modifying binaries (fixes "Syntax error" when running on EC2)
+dist/llm-proxy binary
+llm-proxy binary
