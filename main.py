@@ -37,12 +37,35 @@ PROXY_API_KEY = os.environ.get("PROXY_API_KEY", "sk-my-proxy-key")
 JWT_TOKEN_MANUAL = os.environ.get("JWT_TOKEN")
 CaaS_JWT_ENV = os.environ.get("CaaS_JWT_ENV", "").strip().lower()  # dev, test, prod
 CaaS_SERVICE_NAME = (os.environ.get("CaaS_SERVICE_NAME", "").strip() or None)  # optional; e.g. a0-proxy-ec2 for whitelist
+# Optional: assume this IAM role before calling token API (e.g. PowerUser if instance role can't invoke API)
+CaaS_ASSUME_ROLE_ARN = (os.environ.get("CaaS_ASSUME_ROLE_ARN", "").strip() or None)
 JWT_REFRESH_INTERVAL_SEC = int(os.environ.get("JWT_REFRESH_INTERVAL_SEC", "1800"))  # 30 min default
 
 # When using CaaS_JWT_ENV, we store the current token and refresh it in the background.
 _jwt_token_refreshed: str | None = None
 _jwt_last_refresh_at: float | None = None  # epoch sec, for status endpoint
 _jwt_last_refresh_error: str | None = None  # last exception message when refresh failed (for /jwt-status)
+
+
+def _ensure_assumed_role_creds() -> None:
+    """If CaaS_ASSUME_ROLE_ARN is set, assume that role and set AWS_* env vars so gd_auth uses it."""
+    if not CaaS_ASSUME_ROLE_ARN:
+        return
+    try:
+        import boto3
+    except ImportError as e:
+        raise RuntimeError("CaaS_ASSUME_ROLE_ARN is set but boto3 is not installed. pip install boto3") from e
+    sts = boto3.client("sts")
+    resp = sts.assume_role(
+        RoleArn=CaaS_ASSUME_ROLE_ARN,
+        RoleSessionName="llm-proxy-token-session",
+        DurationSeconds=3600,
+    )
+    creds = resp["Credentials"]
+    os.environ["AWS_ACCESS_KEY_ID"] = creds["AccessKeyId"]
+    os.environ["AWS_SECRET_ACCESS_KEY"] = creds["SecretAccessKey"]
+    os.environ["AWS_SESSION_TOKEN"] = creds["SessionToken"]
+    logger.info("Assumed role %s for token API", CaaS_ASSUME_ROLE_ARN)
 
 
 def _get_jwt_via_gd_auth(env: str) -> str:
@@ -62,6 +85,9 @@ def _get_jwt_via_gd_auth(env: str) -> str:
     }
     if env not in SSO_HOSTS:
         raise ValueError(f"CaaS_JWT_ENV must be one of: {list(SSO_HOSTS.keys())}, got: {env!r}")
+
+    # Optionally assume another role so gd_auth uses those creds (e.g. PowerUser with execute-api:Invoke)
+    _ensure_assumed_role_creds()
 
     kwargs: dict = {
         "refresh_min": 60,
@@ -178,6 +204,7 @@ async def jwt_status():
             "jwt_mode": "auto",
             "caas_env": CaaS_JWT_ENV,
             "service_name_set": bool(CaaS_SERVICE_NAME),
+            "assume_role_set": bool(CaaS_ASSUME_ROLE_ARN),
             "token_ready": _jwt_token_refreshed is not None and len(_jwt_token_refreshed) > 0,
             "last_refresh_sec_ago": round(now - _jwt_last_refresh_at, 1) if _jwt_last_refresh_at else None,
             "refresh_interval_sec": JWT_REFRESH_INTERVAL_SEC,

@@ -94,7 +94,7 @@ Expect:
 - `last_refresh_sec_ago`: number (seconds since last refresh)
 - `last_refresh_error`: `null`
 
-If `token_ready` is `false`, check `last_refresh_error` and ensure the image has `gd_auth` and the container has AWS credentials and `CaaS_JWT_ENV`. If the error is **Forbidden / not authorized to perform: execute-api:Invoke**, the EC2 instance role must be whitelisted with the CaaS team; you can also set **`CaaS_SERVICE_NAME`** (e.g. `a0-proxy-ec2`) if the token API requires the service name to match the whitelist.
+If `token_ready` is `false`, check `last_refresh_error` and ensure the image has `gd_auth` and the container has AWS credentials and `CaaS_JWT_ENV`. If the error is **Forbidden / not authorized to perform: execute-api:Invoke**, either have the instance role whitelisted with CaaS, or set **`CaaS_ASSUME_ROLE_ARN`** to a role that can invoke the token API (e.g. `arn:aws:iam::661303382885:role/GD-AWS-USA-GD-GDASMv2-Dev-Private-PowerUser`). That role’s **trust policy** must allow the EC2 instance role to assume it, and the instance role needs **sts:AssumeRole** on that role.
 
 ## 4. Optional: refresh interval
 
@@ -199,13 +199,15 @@ chmod +x llm-proxy
 
 ### Step 3 — Run proxy
 
-Set env (do not set `JWT_TOKEN` or `AWS_*` — instance IAM role is used for JWT). If CaaS whitelisted a **service name** (e.g. `a0-proxy-ec2`), set it so the token API can match your role:
+Set env. Do not set `JWT_TOKEN`; the proxy uses the EC2 instance role (or an assumed role). Optional: **CaaS_SERVICE_NAME** if the token API expects it; **CaaS_ASSUME_ROLE_ARN** to assume another role (e.g. PowerUser) before calling the token API if the instance role can’t invoke it:
 
 ```bash
 export CaaS_JWT_ENV=dev
 export PROXY_API_KEY=sk-my-proxy-key
-# Optional: if CaaS token API requires the whitelisted service name
+# Optional: service name for CaaS whitelist
 export CaaS_SERVICE_NAME=a0-proxy-ec2
+# Optional: assume this role for token API (role must trust the instance role; instance role needs sts:AssumeRole)
+export CaaS_ASSUME_ROLE_ARN=arn:aws:iam::661303382885:role/GD-AWS-USA-GD-GDASMv2-Dev-Private-PowerUser
 ```
 
 Start it in the background (use `dist/llm-proxy` if you cloned the repo; redirect stdin so the process doesn’t exit under nohup):
