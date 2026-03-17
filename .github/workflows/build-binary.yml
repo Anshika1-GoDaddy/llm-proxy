@@ -1,0 +1,39 @@
+# Build Linux binary for EC2 (a0 cluster). Same idea as building Agent Zero binary from GitHub.
+# Artifact: dist/llm-proxy. Use in your release/deploy pipeline or download from Actions.
+name: Build Linux binary
+
+on:
+  push:
+    branches: [main, master]
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: |
+          python -m pip install -r requirements.txt
+          if ls wheels/*.whl 1>/dev/null 2>&1; then pip install wheels/*.whl; fi
+          pip install pyinstaller
+
+      - name: Build binary
+        run: |
+          pyinstaller --clean --noconfirm \
+            --onefile --name llm-proxy \
+            --hidden-import=main \
+            --collect-submodules=uvicorn --collect-submodules=fastapi --collect-submodules=httpx --collect-submodules=gd_auth \
+            run.py
+
+      - name: Upload binary artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: llm-proxy-linux
+          path: dist/llm-proxy

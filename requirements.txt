@@ -1,0 +1,9 @@
+fastapi>=0.103.1
+httpx>=0.25.0
+uvicorn>=0.23.2
+pydantic>=2.0.0
+python-dotenv>=1.0.0
+
+# Optional: for CaaS JWT auto-refresh in Docker. Not on PyPI — install from internal repo
+# and uncomment, or add in Dockerfile: RUN pip install gd_auth --extra-index-url <internal-pypi>
+# gd_auth

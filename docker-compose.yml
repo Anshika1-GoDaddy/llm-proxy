@@ -1,0 +1,29 @@
+services:
+  llm-proxy:
+    build:
+      context: .
+      args:
+        - PIP_EXTRA_INDEX_URL=${PIP_EXTRA_INDEX_URL:-}
+    container_name: llm-proxy-gdsec
+    # Use host network so container can resolve internal SSO (e.g. iam-token.*.sso.dev-godaddy.com) when host is on VPN
+    # network_mode: host
+    ports:
+      - "8000:8000"
+    environment:
+      # Upstream CaaS API (override if your team uses a different URL)
+      - LLM_BASE_URL=${LLM_BASE_URL:-https://caas-dp.open-webui.dev-godaddy.com/api/chat/completions}
+      # Manual JWT (optional; leave unset for auto-refresh)
+      - JWT_TOKEN=${JWT_TOKEN:-}
+      - PROXY_API_KEY=${PROXY_API_KEY:-sk-my-proxy-key}
+      # Auto-refresh: set CaaS_JWT_ENV and pass AWS creds from host (e.g. after aws-okta-processor)
+      - CaaS_JWT_ENV=${CaaS_JWT_ENV:-}
+      - AWS_ACCESS_KEY_ID=${AWS_ACCESS_KEY_ID:-}
+      - AWS_SECRET_ACCESS_KEY=${AWS_SECRET_ACCESS_KEY:-}
+      - AWS_SESSION_TOKEN=${AWS_SESSION_TOKEN:-}
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 5s
