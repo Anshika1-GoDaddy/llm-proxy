@@ -94,7 +94,7 @@ Expect:
 - `last_refresh_sec_ago`: number (seconds since last refresh)
 - `last_refresh_error`: `null`
 
-If `token_ready` is `false`, check `last_refresh_error` and ensure the image has `gd_auth` and the container has AWS credentials and `CaaS_JWT_ENV`.
+If `token_ready` is `false`, check `last_refresh_error` and ensure the image has `gd_auth` and the container has AWS credentials and `CaaS_JWT_ENV`. If the error is **Forbidden / not authorized to perform: execute-api:Invoke**, the EC2 instance role must be whitelisted with the CaaS team; you can also set **`CaaS_SERVICE_NAME`** (e.g. `a0-proxy-ec2`) if the token API requires the service name to match the whitelist.
 
 ## 4. Optional: refresh interval
 
@@ -199,18 +199,22 @@ chmod +x llm-proxy
 
 ### Step 3 — Run proxy
 
-Set env (do not set `JWT_TOKEN` or `AWS_*` — instance IAM role is used for JWT):
+Set env (do not set `JWT_TOKEN` or `AWS_*` — instance IAM role is used for JWT). If CaaS whitelisted a **service name** (e.g. `a0-proxy-ec2`), set it so the token API can match your role:
 
 ```bash
 export CaaS_JWT_ENV=dev
-export PROXY_API_KEY=sk-your-proxy-key
+export PROXY_API_KEY=sk-my-proxy-key
+# Optional: if CaaS token API requires the whitelisted service name
+export CaaS_SERVICE_NAME=a0-proxy-ec2
 ```
 
-Start it in the background:
+Start it in the background (use `dist/llm-proxy` if you cloned the repo; redirect stdin so the process doesn’t exit under nohup):
 
 ```bash
-nohup ./llm-proxy > proxy.log 2>&1 &
+nohup ./dist/llm-proxy </dev/null >> proxy.log 2>&1 &
 ```
+
+If the process exits right away (e.g. `Done(1)`), see **Troubleshooting: proxy exits with nohup** below.
 
 ### Step 4 — Verify
 
@@ -233,6 +237,30 @@ curl -s http://localhost:8000/jwt-status | jq
 ```
 
 Your EC2 will now be running **Agent Zero → 50010**, **LLM Proxy → 8000**. Point Agent Zero at the proxy (e.g. `http://192.168.11.216:8000` when on the same host, or the instance’s private IP) with the same `PROXY_API_KEY`.
+
+### Troubleshooting: proxy exits with nohup
+
+If `nohup ./dist/llm-proxy > proxy.log 2>&1 &` exits immediately (e.g. `[1] + Done(1)`):
+
+1. **See the real error** — run in foreground and watch the output:
+   ```bash
+   cd ~/llm-proxy
+   export CaaS_JWT_ENV=dev
+   export PROXY_API_KEY=sk-your-proxy-key
+   ./dist/llm-proxy 2>&1 | tee proxy.log
+   ```
+   If it stays up, press Ctrl+C and try background again with **stdin closed**:
+   ```bash
+   nohup ./dist/llm-proxy </dev/null >> proxy.log 2>&1 &
+   ```
+
+2. **Check the log** after a failed run:
+   ```bash
+   cat proxy.log
+   ```
+   If you see `gd_auth is not installed`, the binary was built without the gd_auth wheel — rebuild on your laptop with `./scripts/build_gd_auth_wheel.sh` then `./scripts/build_binary_linux.sh` and push again.
+
+3. **Confirm the binary** — on EC2 run `file ./dist/llm-proxy`. It must show **`x86-64`** (your EC2 is amd64). If it shows **`ARM aarch64`**, the binary was built for the wrong architecture (e.g. from Apple Silicon without `--platform linux/amd64`). Rebuild on your laptop with `./scripts/build_binary_linux.sh` (it now forces amd64) and push again. If it shows `ASCII` or `data`, Git corrupted it; ensure `.gitattributes` has `dist/llm-proxy binary` and re-push.
 
 ---
 
@@ -365,12 +393,12 @@ Agent Zero → proxy (with `PROXY_API_KEY`) → proxy adds CaaS JWT (from `gd_au
   Binary: `dist/llm-proxy`
 
 - **Option B – Build a Linux binary from macOS/Windows (for EC2)**  
-  From repo root:
+  From repo root. **Use this so the binary is x86_64 (amd64)** — your a0 EC2 is x86_64; the script forces `--platform linux/amd64` so it works even on Apple Silicon:
   ```bash
   ./scripts/build_gd_auth_wheel.sh   # if you need JWT auto-refresh
-  ./scripts/build_binary_linux.sh    # uses Docker to build Linux binary
+  ./scripts/build_binary_linux.sh    # Docker build → dist/llm-proxy (Linux amd64)
   ```
-  Binary: `dist/llm-proxy` (Linux x86_64)
+  After build, run `file dist/llm-proxy` — it must show **x86-64**, not aarch64. Then commit and push `dist/llm-proxy`.
 
 - **Option C – GitHub Actions (same idea as building Agent Zero from GitHub)**  
   Push to `main`/`master` or run the workflow manually. The [build-binary](.github/workflows/build-binary.yml) workflow produces a Linux binary and uploads it as artifact `llm-proxy-linux`. Download from the Actions run and use that for EC2.  

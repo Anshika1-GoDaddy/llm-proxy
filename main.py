@@ -19,6 +19,8 @@ try:
 except ImportError:
     pass  # optional; env vars can be set by shell/container
 
+from contextlib import asynccontextmanager
+
 from fastapi import FastAPI, Request, HTTPException
 from fastapi.responses import JSONResponse, StreamingResponse
 
@@ -34,6 +36,7 @@ PROXY_API_KEY = os.environ.get("PROXY_API_KEY", "sk-my-proxy-key")
 # JWT: either manual (JWT_TOKEN) or auto-refresh via gd_auth (CaaS_JWT_ENV = dev|test|prod)
 JWT_TOKEN_MANUAL = os.environ.get("JWT_TOKEN")
 CaaS_JWT_ENV = os.environ.get("CaaS_JWT_ENV", "").strip().lower()  # dev, test, prod
+CaaS_SERVICE_NAME = (os.environ.get("CaaS_SERVICE_NAME", "").strip() or None)  # optional; e.g. a0-proxy-ec2 for whitelist
 JWT_REFRESH_INTERVAL_SEC = int(os.environ.get("JWT_REFRESH_INTERVAL_SEC", "1800"))  # 30 min default
 
 # When using CaaS_JWT_ENV, we store the current token and refresh it in the background.
@@ -60,11 +63,21 @@ def _get_jwt_via_gd_auth(env: str) -> str:
     if env not in SSO_HOSTS:
         raise ValueError(f"CaaS_JWT_ENV must be one of: {list(SSO_HOSTS.keys())}, got: {env!r}")
 
-    client = AwsIamAuthTokenClient(
-        SSO_HOSTS[env],
-        refresh_min=60,
-        primary_region="us-west-2",
-    )
+    kwargs: dict = {
+        "refresh_min": 60,
+        "primary_region": "us-west-2",
+    }
+    # Pass service name if CaaS token API requires it for whitelisted role (e.g. a0-proxy-ec2)
+    if CaaS_SERVICE_NAME:
+        for key in ("service_name", "service_id", "client_id"):
+            try:
+                client = AwsIamAuthTokenClient(SSO_HOSTS[env], **{**kwargs, key: CaaS_SERVICE_NAME})
+                return client.token
+            except TypeError:
+                continue
+        # gd_auth may not take any of these; try without so we don't break
+        logger.warning("CaaS_SERVICE_NAME=%r set but gd_auth did not accept service_name/service_id/client_id", CaaS_SERVICE_NAME)
+    client = AwsIamAuthTokenClient(SSO_HOSTS[env], **kwargs)
     return client.token
 
 
@@ -130,18 +143,19 @@ logger = logging.getLogger("llm-proxy")
 # FastAPI app & health check
 # -----------------------------------------------------------------------------
 
-app = FastAPI(title="LLM Proxy")
 
-
-@app.on_event("startup")
-async def startup_jwt_refresh():
-    """When using CaaS_JWT_ENV, refresh JWT once at startup and start background refresh loop."""
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    """Startup: JWT refresh when using CaaS_JWT_ENV. Shutdown: nothing special."""
     if CaaS_JWT_ENV:
-        # Initial refresh so first request has a token
         loop = asyncio.get_event_loop()
         await loop.run_in_executor(None, _refresh_jwt_sync)
         asyncio.create_task(_jwt_refresh_loop())
         logger.info("CaaS JWT auto-refresh enabled (env=%s, interval=%ss)", CaaS_JWT_ENV, JWT_REFRESH_INTERVAL_SEC)
+    yield
+
+
+app = FastAPI(title="LLM Proxy", lifespan=lifespan)
 
 
 @app.get("/health")
@@ -163,6 +177,7 @@ async def jwt_status():
         return {
             "jwt_mode": "auto",
             "caas_env": CaaS_JWT_ENV,
+            "service_name_set": bool(CaaS_SERVICE_NAME),
             "token_ready": _jwt_token_refreshed is not None and len(_jwt_token_refreshed) > 0,
             "last_refresh_sec_ago": round(now - _jwt_last_refresh_at, 1) if _jwt_last_refresh_at else None,
             "refresh_interval_sec": JWT_REFRESH_INTERVAL_SEC,
