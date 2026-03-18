@@ -32,7 +32,7 @@ from fastapi.responses import JSONResponse, StreamingResponse
 # -----------------------------------------------------------------------------
 
 # caas-dp accepts sso-jwt; caas.open-webui.godaddy.com (Web UI) may return 500 for API + JWT (different auth).
-LLM_BASE_URL = os.environ.get("LLM_BASE_URL", "https://caas-dp.open-webui.dev-godaddy.com/api/chat/completions")
+LLM_BASE_URL = os.environ.get("LLM_BASE_URL", "https://caas.open-webui.dev-godaddy.com/api/chat/completions")
 PROXY_API_KEY = os.environ.get("PROXY_API_KEY", "sk-my-proxy-key")
 # Optional: use CaaS API key for upstream (Bearer) instead of JWT. Use this to test if proxy works with same auth as Agent Zero direct.
 CAAS_API_KEY = os.environ.get("CAAS_API_KEY", "").strip() or None
