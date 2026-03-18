@@ -34,6 +34,8 @@ from fastapi.responses import JSONResponse, StreamingResponse
 # caas-dp accepts sso-jwt; caas.open-webui.godaddy.com (Web UI) may return 500 for API + JWT (different auth).
 LLM_BASE_URL = os.environ.get("LLM_BASE_URL", "https://caas-dp.open-webui.dev-godaddy.com/api/chat/completions")
 PROXY_API_KEY = os.environ.get("PROXY_API_KEY", "sk-my-proxy-key")
+# Optional: use CaaS API key for upstream (Bearer) instead of JWT. Use this to test if proxy works with same auth as Agent Zero direct.
+CAAS_API_KEY = os.environ.get("CAAS_API_KEY", "").strip() or None
 
 # JWT: either manual (JWT_TOKEN) or auto-refresh via gd_auth (CaaS_JWT_ENV = dev|test|prod)
 JWT_TOKEN_MANUAL = os.environ.get("JWT_TOKEN")
@@ -126,10 +128,10 @@ async def _jwt_refresh_loop() -> None:
         await loop.run_in_executor(None, _refresh_jwt_sync)
 
 
-# Ensure at least one JWT source is configured
-if not JWT_TOKEN_MANUAL and not CaaS_JWT_ENV:
+# Ensure at least one upstream auth: CaaS API key (Bearer) or JWT
+if not CAAS_API_KEY and not JWT_TOKEN_MANUAL and not CaaS_JWT_ENV:
     raise ValueError(
-        "Set JWT_TOKEN (manual token) or CaaS_JWT_ENV (dev|test|prod for auto-refresh with gd_auth)."
+        "Set CAAS_API_KEY (Bearer key), JWT_TOKEN (manual token), or CaaS_JWT_ENV (dev|test|prod for auto-refresh with gd_auth)."
     )
 
 
@@ -175,6 +177,8 @@ async def jwt_status():
     - last_refresh_sec_ago: (auto only) seconds since last refresh
     """
     now = time.time()
+    if CAAS_API_KEY:
+        return {"upstream_auth": "caas_api_key", "token_ready": True}
     if CaaS_JWT_ENV:
         return {
             "jwt_mode": "auto",
@@ -213,32 +217,33 @@ async def call_upstream(payload: dict):
     logger.info("URL: %s", LLM_BASE_URL)
     logger.info(json.dumps(payload, indent=2)[:2000])
 
-    def do_request(token: str):
-        return {
-            "Content-Type": "application/json",
-            "Authorization": f"sso-jwt {token}",
-        }
+    if CAAS_API_KEY:
+        # Use CaaS API key (Bearer) — same as when Agent Zero calls CaaS directly.
+        headers = {"Content-Type": "application/json", "Authorization": f"Bearer {CAAS_API_KEY}"}
+    else:
+        token = get_llm_jwt()
+        headers = {"Content-Type": "application/json", "Authorization": f"sso-jwt {token}"}
 
-    token = get_llm_jwt()
     try:
         async with httpx.AsyncClient(timeout=120) as client:
             response = await client.post(
                 LLM_BASE_URL,
                 json=payload,
-                headers=do_request(token),
+                headers=headers,
             )
 
             logger.info("========== UPSTREAM RESPONSE STATUS ==========")
             logger.info(response.status_code)
 
-            if response.status_code == 401 and CaaS_JWT_ENV:
+            if response.status_code == 401 and CaaS_JWT_ENV and not CAAS_API_KEY:
                 logger.warning("Upstream returned 401 → refreshing JWT and retrying once")
                 _refresh_jwt_sync()
                 token = get_llm_jwt()
+                headers = {"Content-Type": "application/json", "Authorization": f"sso-jwt {token}"}
                 response = await client.post(
                     LLM_BASE_URL,
                     json=payload,
-                    headers=do_request(token),
+                    headers=headers,
                 )
                 logger.info("========== UPSTREAM RESPONSE STATUS (after retry) ==========")
                 logger.info(response.status_code)
@@ -333,9 +338,25 @@ async def chat_completions(request: Request):
     result, status, error = await call_upstream(body)
 
     if status != 200 or not result:
-        return JSONResponse(status_code=status, content={"error": error})
+        logger.error("========== CHAT COMPLETION UPSTREAM FAILED ========== status=%s error=%s", status, error)
+        # Return 502 (Bad Gateway) so clients know the failure is upstream (CaaS), not the proxy
+        msg = (error or "Upstream request failed").strip()
+        if not msg or msg == "Internal Server Error":
+            msg = (
+                "CaaS (upstream) returned %s. "
+                "If JWT works for /jwt-status but chat fails, CaaS may not accept sso-jwt for this endpoint; ask CaaS team to fix."
+            ) % status
+        return JSONResponse(status_code=502, content={"error": msg})
 
-    content = result["choices"][0]["message"]["content"]
+    try:
+        content = result["choices"][0]["message"]["content"]
+    except (KeyError, TypeError, IndexError) as e:
+        logger.error("========== UPSTREAM RESPONSE UNEXPECTED SHAPE ========== %s", e)
+        logger.error("result keys: %s", list(result.keys()) if isinstance(result, dict) else type(result))
+        return JSONResponse(
+            status_code=502,
+            content={"error": f"Upstream response missing choices/message/content. {e!s}"},
+        )
 
     logger.info("========== RAW MODEL CONTENT ==========")
     logger.info((content or "")[:1000])
@@ -429,7 +450,10 @@ async def responses(request: Request):
     result, status, error = await call_upstream(chat_payload)
 
     if status != 200 or not result:
-        return JSONResponse(status_code=status, content={"error": error})
+        msg = (error or "Upstream request failed").strip()
+        if not msg or msg == "Internal Server Error":
+            msg = "CaaS (upstream) returned %s. Ask CaaS team to fix chat completions for sso-jwt auth." % status
+        return JSONResponse(status_code=502, content={"error": msg})
 
     try:
         content = result["choices"][0]["message"]["content"]
